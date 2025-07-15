@@ -69,6 +69,10 @@ class Customer(BaseModel):
     phone_number: str | None
     preferences: dict | None
 
+class ChatRequest(BaseModel):
+    message: str
+    conversation_id: str | None = None
+
 # JWT authentication
 def verify_token(token: str = Depends(oauth2_scheme)):
     try:
@@ -78,7 +82,7 @@ def verify_token(token: str = Depends(oauth2_scheme)):
         logger.error(f"Invalid token: {str(e)}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-# Placeholder admin login (for testing)
+# Placeholder admin login
 @app.get("/token")
 async def get_token():
     payload = {"sub": "admin"}
@@ -177,3 +181,73 @@ async def create_customer(customer: Customer):
     except Exception as e:
         logger.error(f"Error creating customer: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating customer: {str(e)}")
+
+# Chat endpoint
+@app.post("/chat")
+async def chat(chat_request: ChatRequest):
+    try:
+        # Get or create conversation_id
+        conversation_id = chat_request.conversation_id or str(uuid.uuid4())
+        user_message = chat_request.message
+
+        # Simple rule-based response
+        conn = get_db_connection()
+        cur = conn.cursor()
+        bot_response = None
+        if "budget" in user_message.lower() or "price" in user_message.lower():
+            max_price = None
+            for word in user_message.split():
+                if word.replace(',', '').isdigit():
+                    max_price = float(word.replace(',', ''))
+                    break
+            if max_price:
+                query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE price_jod <= %s"
+                cur.execute(query, (max_price,))
+                units = cur.fetchall()
+                if units:
+                    bot_response = f"Found {len(units)} apartments within your budget of {max_price} JOD:\n"
+                    for unit in units[:3]:
+                        bot_response += f"- Unit {unit['unit_number'] or 'N/A'} at {unit['address']}, {unit['size_sqm']} sqm, {unit['price_jod']} JOD\n"
+                else:
+                    bot_response = "No apartments found within your budget. Try a higher budget or different criteria."
+            else:
+                bot_response = "Please specify a budget (e.g., 'budget 70000')."
+        elif "bedrooms" in user_message.lower():
+            bedrooms = None
+            for word in user_message.split():
+                if word.isdigit():
+                    bedrooms = int(word)
+                    break
+            if bedrooms:
+                query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE bedrooms = %s"
+                cur.execute(query, (bedrooms,))
+                units = cur.fetchall()
+                if units:
+                    bot_response = f"Found {len(units)} apartments with {bedrooms} bedrooms:\n"
+                    for unit in units[:3]:
+                        bot_response += f"- Unit {unit['unit_number'] or 'N/A'} at {unit['address']}, {unit['size_sqm']} sqm, {unit['price_jod']} JOD\n"
+                else:
+                    bot_response = f"No apartments found with {bedrooms} bedrooms."
+            else:
+                bot_response = "Please specify the number of bedrooms (e.g., '3 bedrooms')."
+        else:
+            bot_response = "Hello! How can I help you find an apartment? Please specify your budget, number of bedrooms, or location."
+
+        # Store chat in database
+        cur.execute(
+            """
+            INSERT INTO Chats (conversation_id, user_message, bot_response)
+            VALUES (%s, %s, %s)
+            RETURNING chat_id
+            """,
+            (conversation_id, user_message, bot_response)
+        )
+        chat_id = cur.fetchone()['chat_id']
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {"conversation_id": conversation_id, "bot_response": bot_response}
+    except Exception as e:
+        logger.error(f"Error processing chat: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}")
