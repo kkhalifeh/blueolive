@@ -10,6 +10,13 @@ import jwt
 import uuid
 import json
 import logging
+import re
+from langchain_xai import ChatXAI
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.vectorstores import PGVector
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.messages import HumanMessage, SystemMessage
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,6 +30,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 JWT_SECRET = os.getenv("JWT_SECRET", "your_jwt_secret_key")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+XAI_API_KEY = os.getenv("XAI_API_KEY")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 
 # Database connection
 def get_db_connection():
@@ -32,6 +42,37 @@ def get_db_connection():
     except Exception as e:
         logger.error(f"Database connection failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
+
+# Initialize LLM
+llm = None
+if LLM_PROVIDER == "xai" and XAI_API_KEY:
+    try:
+        llm = ChatXAI(api_key=XAI_API_KEY, model="grok-3")
+        logger.info("Initialized xAI ChatXAI (Grok 3)")
+    except Exception as e:
+        logger.error(f"Failed to initialize xAI ChatXAI: {str(e)}")
+elif LLM_PROVIDER == "openai" and OPENAI_API_KEY:
+    try:
+        llm = ChatOpenAI(api_key=OPENAI_API_KEY, model="gpt-4o")
+        logger.info("Initialized OpenAI ChatGPT (GPT-4o)")
+    except Exception as e:
+        logger.error(f"Failed to initialize OpenAI ChatGPT: {str(e)}")
+else:
+    logger.warning("No valid LLM provider configured. Using rule-based logic.")
+
+# Initialize vector store
+embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+try:
+    vector_store = PGVector(
+        connection_string=DATABASE_URL,
+        embedding_function=embedding_function,
+        collection_name="units",
+        distance_strategy="cosine"
+    )
+    logger.info("Initialized PGVector store")
+except Exception as e:
+    logger.error(f"Failed to initialize PGVector: {str(e)}")
+    vector_store = None
 
 # Pydantic models
 class Unit(BaseModel):
@@ -91,7 +132,7 @@ async def get_token():
 
 # Endpoint to query units
 @app.get("/units", response_model=list[Unit])
-async def get_units(bedrooms: int | None = None, max_price: float | None = None):
+async def get_units(bedrooms: int | None = None, max_price: float | None = None, location: str | None = None):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -103,6 +144,9 @@ async def get_units(bedrooms: int | None = None, max_price: float | None = None)
         if max_price:
             query += " AND price_jod <= %s"
             params.append(max_price)
+        if location:
+            query += " AND address ILIKE %s"
+            params.append(f"%{location}%")
         cur.execute(query, params)
         units = cur.fetchall()
         cur.close()
@@ -190,50 +234,153 @@ async def chat(chat_request: ChatRequest):
         conversation_id = chat_request.conversation_id or str(uuid.uuid4())
         user_message = chat_request.message
 
-        # Simple rule-based response
+        # Get AI settings
         conn = get_db_connection()
         cur = conn.cursor()
-        bot_response = None
-        if "budget" in user_message.lower() or "price" in user_message.lower():
-            max_price = None
-            for word in user_message.split():
-                if word.replace(',', '').isdigit():
-                    max_price = float(word.replace(',', ''))
-                    break
-            if max_price:
-                query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE price_jod <= %s"
-                cur.execute(query, (max_price,))
-                units = cur.fetchall()
-                if units:
-                    bot_response = f"Found {len(units)} apartments within your budget of {max_price} JOD:\n"
-                    for unit in units[:3]:
-                        bot_response += f"- Unit {unit['unit_number'] or 'N/A'} at {unit['address']}, {unit['size_sqm']} sqm, {unit['price_jod']} JOD\n"
-                else:
-                    bot_response = "No apartments found within your budget. Try a higher budget or different criteria."
+        cur.execute("SELECT prompt, temperature, max_tokens FROM AI_Settings ORDER BY setting_id DESC LIMIT 1")
+        ai_settings = cur.fetchone()
+        cur.close()
+
+        # Parse preferences
+        preferences = {}
+        budget_match = re.search(r'(\d+)(?:\s*(?:jod|jd|\$))?', user_message.lower())
+        if budget_match:
+            preferences["budget"] = float(budget_match.group(1))
+        bedrooms_match = re.search(r'(\d+)\s*bedroom', user_message.lower())
+        if bedrooms_match:
+            preferences["bedrooms"] = int(bedrooms_match.group(1))
+        
+        # Enhanced location extraction with multi-language support
+        location_aliases = {
+            "abu alanda": "ابو علندا",
+            "abualanda": "ابو علندا", 
+            "abu allanda": "ابو علندا",
+            "أبو علندا": "ابو علندا",
+            "ابو علندا": "ابو علندا",
+            "rashid": "ضاحية الرشيد",
+            "dahiat rashid": "ضاحية الرشيد",
+            "ضاحية الرشيد": "ضاحية الرشيد",
+            "mansour": "حي المنصور",
+            "hai almansour": "حي المنصور",
+            "حي المنصور": "حي المنصور"
+        }
+        
+        for alias, location in location_aliases.items():
+            if alias in user_message.lower():
+                preferences["location"] = location
+                break
+
+        # Get existing preferences first
+        cur = conn.cursor()
+        cur.execute("SELECT preferences FROM Customers WHERE conversation_id = %s", (conversation_id,))
+        customer = cur.fetchone()
+        existing_preferences = {}
+        if customer and customer['preferences']:
+            existing_preferences = customer['preferences']
+        
+        # Merge preferences if we have new ones
+        if preferences:
+            merged_preferences = existing_preferences.copy()
+            merged_preferences.update(preferences)
+            
+            logger.info(f"Merging preferences: existing={existing_preferences}, new={preferences}, merged={merged_preferences}")
+            
+            # Update or create customer preferences
+            if customer:
+                cur.execute(
+                    "UPDATE Customers SET preferences = %s WHERE conversation_id = %s",
+                    (json.dumps(merged_preferences), conversation_id)
+                )
+                logger.info(f"Updated customer preferences for conversation {conversation_id}")
             else:
-                bot_response = "Please specify a budget (e.g., 'budget 70000')."
-        elif "bedrooms" in user_message.lower():
-            bedrooms = None
-            for word in user_message.split():
-                if word.isdigit():
-                    bedrooms = int(word)
-                    break
-            if bedrooms:
-                query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE bedrooms = %s"
-                cur.execute(query, (bedrooms,))
-                units = cur.fetchall()
-                if units:
-                    bot_response = f"Found {len(units)} apartments with {bedrooms} bedrooms:\n"
-                    for unit in units[:3]:
-                        bot_response += f"- Unit {unit['unit_number'] or 'N/A'} at {unit['address']}, {unit['size_sqm']} sqm, {unit['price_jod']} JOD\n"
-                else:
-                    bot_response = f"No apartments found with {bedrooms} bedrooms."
-            else:
-                bot_response = "Please specify the number of bedrooms (e.g., '3 bedrooms')."
+                cur.execute(
+                    "INSERT INTO Customers (conversation_id, preferences) VALUES (%s, %s)",
+                    (conversation_id, json.dumps(merged_preferences))
+                )
+                logger.info(f"Created new customer for conversation {conversation_id}")
+            conn.commit()
+            existing_preferences = merged_preferences
+        
+        cur.close()
+        
+        # Use existing preferences for context and queries
+        preferences_context = json.dumps(existing_preferences)
+        logger.info(f"Using preferences for query: {existing_preferences}")
+
+        # Query units based on existing preferences (now merged)
+        query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE 1=1"
+        params = []
+        if existing_preferences.get("budget"):
+            query += " AND price_jod <= %s"
+            params.append(existing_preferences["budget"])
+        if existing_preferences.get("bedrooms"):
+            query += " AND bedrooms = %s"
+            params.append(existing_preferences["bedrooms"])
+        if existing_preferences.get("location"):
+            query += " AND address ILIKE %s"
+            params.append(f"%{existing_preferences['location']}%")
+        
+        cur = conn.cursor()
+        cur.execute(query, params)
+        units = cur.fetchall()
+        cur.close()
+
+        unit_context = ""
+        if units:
+            unit_context = "\n".join([f"Unit {unit['unit_number'] or 'N/A'} at {unit['address']}, {unit['size_sqm']} sqm, {unit['price_jod']} JOD, {unit['bedrooms']} bedrooms, Description: {unit['description_ar']}" for unit in units[:3]])
         else:
-            bot_response = "Hello! How can I help you find an apartment? Please specify your budget, number of bedrooms, or location."
+            unit_context = "No apartments found matching the criteria."
+
+        if llm and ai_settings:
+            # LLM-based response with enhanced context
+            system_prompt = f"""{ai_settings['prompt']}
+
+Current Customer Preferences: {preferences_context}
+
+Available Units Based on Preferences:
+{unit_context}
+
+Instructions:
+- If units are available, present them in a clear, organized format with key details
+- If no units match, ask for different criteria or suggest alternatives
+- Be conversational and helpful
+- Use Arabic or English based on the user's language preference
+- Include unit numbers, addresses, sizes, prices, and key features
+"""
+            
+            prompt_template = ChatPromptTemplate.from_messages([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_message)
+            ])
+            
+            try:
+                # Try LLM response first
+                response = llm.invoke(prompt_template.format_messages(), temperature=ai_settings['temperature'], max_tokens=ai_settings['max_tokens'])
+                bot_response = response.content
+                
+                # If LLM response is too generic, use rule-based fallback
+                if not bot_response or "how can i help" in bot_response.lower():
+                    if units:
+                        bot_response = f"Found {len(units)} apartments matching your criteria:\n{unit_context}"
+                    else:
+                        bot_response = "No apartments found matching your criteria. Please provide more details like budget, bedrooms, or location."
+                        
+            except Exception as e:
+                logger.error(f"LLM failed: {str(e)}")
+                # Rule-based fallback
+                if units:
+                    bot_response = f"Found {len(units)} apartments matching your criteria:\n{unit_context}"
+                else:
+                    bot_response = "No apartments found matching your criteria. Please provide more details like budget, bedrooms, or location."
+        else:
+            # Rule-based response when no LLM
+            if units:
+                bot_response = f"Found {len(units)} apartments matching your criteria:\n{unit_context}"
+            else:
+                bot_response = "No apartments found matching your criteria. Please provide more details like budget, bedrooms, or location."
 
         # Store chat in database
+        cur = conn.cursor()
         cur.execute(
             """
             INSERT INTO Chats (conversation_id, user_message, bot_response)
