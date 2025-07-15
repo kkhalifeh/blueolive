@@ -11,6 +11,8 @@ import uuid
 import json
 import logging
 import re
+from langdetect import detect
+from langdetect.lang_detect_exception import LangDetectException
 from langchain_xai import ChatXAI
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -73,6 +75,19 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize PGVector: {str(e)}")
     vector_store = None
+
+# Language detection function
+def detect_language(text: str) -> str:
+    """Detect if text is Arabic (ar) or English (en). Default to English."""
+    try:
+        detected = detect(text)
+        if detected == 'ar':
+            return 'ar'
+        else:
+            return 'en'
+    except LangDetectException:
+        # Default to English if detection fails
+        return 'en'
 
 # Pydantic models
 class Unit(BaseModel):
@@ -233,6 +248,10 @@ async def chat(chat_request: ChatRequest):
         # Get or create conversation_id
         conversation_id = chat_request.conversation_id or str(uuid.uuid4())
         user_message = chat_request.message
+        
+        # Detect language
+        detected_language = detect_language(user_message)
+        logger.info(f"Detected language: {detected_language} for message: {user_message}")
 
         # Get AI settings
         conn = get_db_connection()
@@ -246,9 +265,26 @@ async def chat(chat_request: ChatRequest):
         budget_match = re.search(r'(\d+)(?:\s*(?:jod|jd|\$))?', user_message.lower())
         if budget_match:
             preferences["budget"] = float(budget_match.group(1))
-        bedrooms_match = re.search(r'(\d+)\s*bedroom', user_message.lower())
-        if bedrooms_match:
+            logger.info(f"Extracted budget: {preferences['budget']}")
+        # English pattern
+        bedrooms_match = re.search(r'(\d+)\s*bedrooms?', user_message.lower())
+        if not bedrooms_match:
+            # Arabic patterns
+            bedrooms_match = re.search(r'(\d+)\s*غرف?', user_message) or re.search(r'(ثلاث|اثنين|واحد|أربع|خمس)', user_message)
+            if bedrooms_match:
+                arabic_numbers = {'واحد': 1, 'اثنين': 2, 'ثلاث': 3, 'أربع': 4, 'خمس': 5}
+                bedroom_text = bedrooms_match.group(1)
+                if bedroom_text.isdigit():
+                    preferences["bedrooms"] = int(bedroom_text)
+                elif bedroom_text in arabic_numbers:
+                    preferences["bedrooms"] = arabic_numbers[bedroom_text]
+        elif bedrooms_match:
             preferences["bedrooms"] = int(bedrooms_match.group(1))
+            
+        if preferences.get("bedrooms"):
+            logger.info(f"Extracted bedrooms: {preferences['bedrooms']}")
+        
+        logger.info(f"Extracted preferences from message '{user_message}': {preferences}")
         
         # Enhanced location extraction with multi-language support
         location_aliases = {
@@ -270,36 +306,54 @@ async def chat(chat_request: ChatRequest):
                 preferences["location"] = location
                 break
 
-        # Get existing preferences first
+        # Get existing preferences and qualification stage
         cur = conn.cursor()
-        cur.execute("SELECT preferences FROM Customers WHERE conversation_id = %s", (conversation_id,))
+        cur.execute("SELECT preferences, qualification_stage FROM Customers WHERE conversation_id = %s", (conversation_id,))
         customer = cur.fetchone()
         existing_preferences = {}
-        if customer and customer['preferences']:
-            existing_preferences = customer['preferences']
+        current_stage = 'initial'
+        if customer:
+            if customer['preferences']:
+                existing_preferences = customer['preferences']
+            current_stage = customer.get('qualification_stage', 'initial')
         
-        # Merge preferences if we have new ones
+        # Always update language preference and merge other preferences
+        merged_preferences = existing_preferences.copy()
+        merged_preferences["language"] = detected_language
+        
         if preferences:
-            merged_preferences = existing_preferences.copy()
             merged_preferences.update(preferences)
-            
             logger.info(f"Merging preferences: existing={existing_preferences}, new={preferences}, merged={merged_preferences}")
-            
-            # Update or create customer preferences
-            if customer:
-                cur.execute(
-                    "UPDATE Customers SET preferences = %s WHERE conversation_id = %s",
-                    (json.dumps(merged_preferences), conversation_id)
-                )
-                logger.info(f"Updated customer preferences for conversation {conversation_id}")
-            else:
-                cur.execute(
-                    "INSERT INTO Customers (conversation_id, preferences) VALUES (%s, %s)",
-                    (conversation_id, json.dumps(merged_preferences))
-                )
-                logger.info(f"Created new customer for conversation {conversation_id}")
-            conn.commit()
-            existing_preferences = merged_preferences
+        
+        # Determine qualification stage based on collected preferences
+        new_stage = current_stage
+        if merged_preferences.get("budget") and current_stage == 'initial':
+            new_stage = 'budget_collected'
+        elif merged_preferences.get("bedrooms") and current_stage in ['initial', 'budget_collected']:
+            new_stage = 'bedrooms_collected'
+        elif merged_preferences.get("location") and current_stage in ['initial', 'budget_collected', 'bedrooms_collected']:
+            new_stage = 'location_collected'
+        elif merged_preferences.get("name") or merged_preferences.get("phone") or merged_preferences.get("email"):
+            new_stage = 'contact_info_collected'
+        
+        logger.info(f"Qualification stage: {current_stage} -> {new_stage}")
+        
+        # Update or create customer preferences (always update to store language and stage)
+        if customer:
+            cur.execute(
+                "UPDATE Customers SET preferences = %s, qualification_stage = %s WHERE conversation_id = %s",
+                (json.dumps(merged_preferences), new_stage, conversation_id)
+            )
+            logger.info(f"Updated customer preferences and stage for conversation {conversation_id}")
+        else:
+            cur.execute(
+                "INSERT INTO Customers (conversation_id, preferences, qualification_stage) VALUES (%s, %s, %s)",
+                (conversation_id, json.dumps(merged_preferences), new_stage)
+            )
+            logger.info(f"Created new customer for conversation {conversation_id}")
+        conn.commit()
+        existing_preferences = merged_preferences
+        current_stage = new_stage
         
         cur.close()
         
@@ -310,30 +364,81 @@ async def chat(chat_request: ChatRequest):
         # Query units based on existing preferences (now merged)
         query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE 1=1"
         params = []
+        logger.info(f"Building query with preferences: {existing_preferences}")
         if existing_preferences.get("budget"):
             query += " AND price_jod <= %s"
             params.append(existing_preferences["budget"])
+            logger.info(f"Added budget filter: {existing_preferences['budget']}")
         if existing_preferences.get("bedrooms"):
             query += " AND bedrooms = %s"
             params.append(existing_preferences["bedrooms"])
+            logger.info(f"Added bedrooms filter: {existing_preferences['bedrooms']}")
         if existing_preferences.get("location"):
             query += " AND address ILIKE %s"
             params.append(f"%{existing_preferences['location']}%")
+            logger.info(f"Added location filter: {existing_preferences['location']}")
+        
+        logger.info(f"Final query: {query} with params: {params}")
         
         cur = conn.cursor()
         cur.execute(query, params)
         units = cur.fetchall()
         cur.close()
+        
+        logger.info(f"Query returned {len(units)} units")
 
         unit_context = ""
         if units:
-            unit_context = "\n".join([f"Unit {unit['unit_number'] or 'N/A'} at {unit['address']}, {unit['size_sqm']} sqm, {unit['price_jod']} JOD, {unit['bedrooms']} bedrooms, Description: {unit['description_ar']}" for unit in units[:3]])
+            unit_details = []
+            for unit in units[:3]:  # Show top 3 units
+                photos = unit['photos_urls'] if unit['photos_urls'] else []
+                photo_text = ""
+                if photos:
+                    photo_text = f"\nPhotos: {', '.join(photos[:2])}"  # Show up to 2 photos
+                
+                unit_text = f"Unit {unit['unit_number'] or 'N/A'} at {unit['address']}, {unit['size_sqm']} sqm, {unit['price_jod']} JOD, {unit['bedrooms']} bedrooms{photo_text}\nDescription: {unit['description_ar'][:200]}..."
+                unit_details.append(unit_text)
+            
+            unit_context = "\n\n".join(unit_details)
+            logger.info(f"Unit context created with {len(units)} units and photos")
         else:
             unit_context = "No apartments found matching the criteria."
+            logger.info("No units found, using default message")
 
         if llm and ai_settings:
+            # Language-specific instructions
+            language_instructions = {
+                'ar': """
+- Respond in Arabic only
+- Use Arabic greetings: "مرحبا! كيف يمكنني مساعدتك؟"
+- Format numbers and prices clearly in Arabic context
+- Use formal Arabic language
+""",
+                'en': """
+- Respond in English only  
+- Use English greetings: "Hello! How can I help you?"
+- Format numbers and prices clearly
+- Use professional English language
+"""
+            }
+            
+            # Generate context-aware prompts based on qualification stage
+            stage_prompts = {
+                'initial': "This is a new customer. Greet them warmly and ask about their apartment requirements.",
+                'budget_collected': f"Customer has provided budget ({existing_preferences.get('budget', 'N/A')} JOD). Now ask about bedrooms and location preferences.",
+                'bedrooms_collected': f"Customer wants {existing_preferences.get('bedrooms', 'N/A')} bedrooms with budget {existing_preferences.get('budget', 'N/A')} JOD. Now ask about location preferences.",
+                'location_collected': "Customer has provided budget, bedrooms, and location. Show matching units and ask if they'd like to schedule a viewing.",
+                'contact_info_collected': "Customer has provided contact information. Offer to schedule viewings and provide next steps."
+            }
+            
             # LLM-based response with enhanced context
             system_prompt = f"""{ai_settings['prompt']}
+
+Language Instructions:
+{language_instructions.get(detected_language, language_instructions['en'])}
+
+Current Customer Qualification Stage: {current_stage}
+Stage Guidance: {stage_prompts.get(current_stage, stage_prompts['initial'])}
 
 Current Customer Preferences: {preferences_context}
 
@@ -341,11 +446,12 @@ Available Units Based on Preferences:
 {unit_context}
 
 Instructions:
+- Respond in {detected_language.upper()} language only
+- Follow the stage guidance to ask appropriate follow-up questions
 - If units are available, present them in a clear, organized format with key details
-- If no units match, ask for different criteria or suggest alternatives
+- Guide the conversation toward collecting missing information (budget, bedrooms, location, contact info)
 - Be conversational and helpful
-- Use Arabic or English based on the user's language preference
-- Include unit numbers, addresses, sizes, prices, and key features
+- Include unit numbers, addresses, sizes, prices, and key features when showing units
 """
             
             prompt_template = ChatPromptTemplate.from_messages([
