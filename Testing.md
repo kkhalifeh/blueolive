@@ -141,4 +141,89 @@ curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '
 ```
 **Result**: SUCCESS - Combined 3 bedrooms + 60000 JOD budget, found 4 matching apartments
 
+### LATEST TESTING:
+
+
+(venv) (base) kkhalifeh@Khaleds-Mac-mini BlueOlive % curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message": "Looking for a spacious apartment in Abu Alanda"}'
+{"conversation_id":"b14155a4-14a6-417a-b836-7d5cd6d7c396","bot_response":"Found 5 apartments matching your criteria:\nUnit 110 at ابو علندا - دوار الحكمة, 110.0 sqm, 52000.0 JOD, 3 bedrooms\nPhotos: https://www.facebook.com/Blueoliverealestate/posts/pfbid0AaU22HRk3Wiah7nu8vJmPtGXhXUPQYd6vDPFnT4Lt9gKC73Rtvne3f1agU27o41zl\nDescription: عرض مغري شقة فاخره   تشطيب سوبر ديلوكس طابق ثالث مع روف مساحه 135م  للبيع من المالك و ترس 35م مطله  و بسعر مغري مع امكانيه   في أجمل مواقع ابو علندا الجديده إطلاله بانوراما \nكفاله لمده سنتين من شركه ا...\n\nUnit 113 at ابو علندا - دوار الحكمة, 113.0 sqm, 69000.0 JOD, 3 bedrooms\nPhotos: https://www.facebook.com/Blueoliverealestate/posts/pfbid036JLdMNsTvbsF5wGHoGkdbPNn5ZsnvEFRuYX87BBC8EccfkhnhtNM1NksQjdJgYZvl\nDescription: شقة مميزة في اجمل مناطق ابو علندا  طابق ثالث مع روف دوبلكس\nمساحة 113م + روف 50م + تراس كبيررر\n بسعر مغررري جدااا  🔥🔥 - قابل للتفاوض\nمقسمه بتصميم عصري\n📍 المواصفات:\n▪️3 غرف نوم واحدة ماستر\n▪️ بلكونة عدد...\n\nUnit 117 at ابو علندا - دوار الحكمة, 117.0 sqm, 50000.0 JOD, 3 bedrooms\nPhotos: https://www.facebook.com/Blueoliverealestate/posts/pfbid0NWrjZxon4u78Pv8Bdsyd79adArtoNGMtzibwdyb6KtWRrQwHYLhPhpXgqCFzkYAUl\nDescription: شقة مميزة 117م في اجمل مناطق ابو علندا \n للبيع بسعر مغررري من المالك \n (نقدًا او بالاقساط ) مع هدية مطبخ راكب لفتره محدوده \n📌 منطقة مطله و هادئة .\nطابق اول او تاني \nتتكون الشقه من 3 غرف نوم و 3 حمام و..."}%                  (venv) (base) kkhalifeh@Khaleds-Mac-mini BlueOlive % curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message": "I want an apartment with a budget of 60000 and 3 bedrooms"}
+quote> 
+(venv) (base) kkhalifeh@Khaleds-Mac-mini BlueOlive % curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message": "I want an apartment with a budget of 60000 and 3 bedrooms"}'
+{"conversation_id":"f4a58346-d028-4eff-b5db-cfd34c649527","bot_response":"Found 4 apartments matching your criteria:\nUnit 110 at ابو علندا - دوار الحكمة, 110.0 sqm, 52000.0 JOD, 3 bedrooms\nPhotos: https://www.facebook.com/Blueoliverealestate/posts/pfbid0AaU22HRk3Wiah7nu8vJmPtGXhXUPQYd6vDPFnT4Lt9gKC73Rtvne3f1agU27o41zl\nDescription: عرض مغري شقة فاخره   تشطيب سوبر ديلوكس طابق ثالث مع روف مساحه 135م  للبيع من المالك و ترس 35م مطله  و بسعر مغري مع امكانيه   في أجمل مواقع ابو علندا الجديده إطلاله بانوراما \nكفاله لمده سنتين من شركه ا...\n\nUnit 117 at ابو علندا - دوار الحكمة, 117.0 sqm, 50000.0 JOD, 3 bedrooms\nPhotos: https://www.facebook.com/Blueoliverealestate/posts/pfbid0NWrjZxon4u78Pv8Bdsyd79adArtoNGMtzibwdyb6KtWRrQwHYLhPhpXgqCFzkYAUl\nDescription: شقة مميزة 117م في اجمل مناطق ابو علندا \n للبيع بسعر مغررري من المالك \n (نقدًا او بالاقساط ) مع هدية مطبخ راكب لفتره محدوده \n📌 منطقة مطله و هادئة .\nطابق اول او تاني \nتتكون الشقه من 3 غرف نوم و 3 حمام و...\n\nUnit 130 at ابو علندا - دوار الحكمة, 130.0 sqm, 55000.0 JOD, 3 bedrooms\nPhotos: https://www.facebook.com/Blueoliverealestate/posts/pfbid0NWrjZxon4u78Pv8Bdsyd79adArtoNGMtzibwdyb6KtWRrQwHYLhPhpXgqCFzkYAUl\nDescription: شقة مميزة 130م في اجمل مناطق ابو علندا \n للبيع بسعر مغررري من المالك \n (نقدًا او بالاقساط ) مع هدية مطبخ راكب لفتره محدوده \n📌 منطقة مطله و هادئة .\nطابق اول او تاني \nتتكون الشقه من 3 غرف نوم و 3 حمام و..."}%                     (venv) (base) kkhalifeh@Khaleds-Mac-mini BlueOlive % 
+
+
+### FEEDBACK:
+
+- ✅ **FIXED**: The bot said in both cases that it found a certain number of units, but the response showed a fewer number that the one it stated it found
+
+### PRIORITY NEXT STEPS:
+
+- ✅ **COMPLETED**: Test Preference Tracking for customer qualification stage
+- ✅ **COMPLETED**: Fix any Identified Issues
+
+### ✅ PAGINATION & AI AGENT TESTING RESULTS:
+
+#### Test 1: AI-Driven Pagination (English) ✅
+```bash
+# Initial search
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message": "I want an apartment with a budget of 60000 and 3 bedrooms in Abu Alanda"}'
+```
+**Result**: SUCCESS - "Showing 3 of 4 apartments found. 1 more apartments available." + "Would you like to see more options?"
+
+```bash
+# Pagination request
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message": "show more", "conversation_id": "CONV_ID"}'
+```
+**Result**: SUCCESS - AI agent naturally showed remaining unit with "This is the last apartment matching your criteria."
+
+#### Test 2: Qualification Stage Progression (Arabic → English) ✅
+```bash
+# Arabic bedrooms preference
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message": "أحتاج شقة بثلاث غرف نوم"}'
+```
+**Result**: SUCCESS - Detected Arabic, extracted 3 bedrooms, asked for location in Arabic
+
+```bash
+# English budget continuation
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message": "budget 60000", "conversation_id": "CONV_ID"}'
+```
+**Result**: SUCCESS - Combined preferences (3 bedrooms + 60000 budget), found 4 apartments, showed 3 with pagination
+
+#### Test 3: Arabic Pagination ✅
+```bash
+# Arabic pagination request
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message": "المزيد من الوحدات", "conversation_id": "CONV_ID"}'
+```
+**Result**: SUCCESS - AI agent responded in Arabic, showed remaining unit with comprehensive details, asked for contact info
+
+### ✅ IMPLEMENTED FEATURES:
+
+#### 🎯 AI-Driven Pagination System
+- **Unit Count Accuracy**: Fixed mismatch between reported and displayed units
+- **Conversational Pagination**: Natural "show more" requests in Arabic/English
+- **Units Tracking**: Prevents showing same units twice
+- **Intelligent Messaging**: "Showing X of Y apartments" with remaining count
+- **Natural Follow-ups**: AI agent offers to show more options
+
+#### 🤖 Enhanced AI Agent Behavior
+- **Professional Persona**: Maintains real estate agent personality
+- **Contextual Awareness**: Remembers what was shown previously
+- **Bilingual Support**: Handles pagination requests in Arabic/English
+- **Stage-Aware Responses**: Adjusts messaging based on qualification stage
+- **Natural Conversation Flow**: Smooth transitions between showing units and gathering info
+
+#### 📊 Qualification Stage Integration
+- **Multi-language Progression**: Arabic bedrooms → English budget → unit display
+- **Preference Persistence**: Correctly merges across conversation turns
+- **Context Maintenance**: Tracks customer progress through qualification stages
+- **Intelligent Prompting**: Asks appropriate follow-up questions based on stage
+
+### 🚀 SYSTEM STATUS: FULLY FUNCTIONAL
+
+All major issues have been resolved:
+- ✅ Unit count mismatch fixed with intelligent pagination
+- ✅ AI agent maintains natural conversation flow
+- ✅ Qualification stages work seamlessly with pagination
+- ✅ Bilingual support includes pagination requests
+- ✅ Professional real estate agent persona maintained
+
 

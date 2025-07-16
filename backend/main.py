@@ -260,6 +260,10 @@ async def chat(chat_request: ChatRequest):
         ai_settings = cur.fetchone()
         cur.close()
 
+        # Check for pagination requests
+        pagination_keywords = ['show more', 'more units', 'see more', 'other options', 'more apartments', 'what else', 'more options', 'اريد المزيد', 'المزيد من الوحدات', 'خيارات أخرى']
+        is_pagination_request = any(keyword in user_message.lower() for keyword in pagination_keywords)
+        
         # Parse preferences
         preferences = {}
         budget_match = re.search(r'(\d+)(?:\s*(?:jod|jd|\$))?', user_message.lower())
@@ -285,6 +289,7 @@ async def chat(chat_request: ChatRequest):
             logger.info(f"Extracted bedrooms: {preferences['bedrooms']}")
         
         logger.info(f"Extracted preferences from message '{user_message}': {preferences}")
+        logger.info(f"Is pagination request: {is_pagination_request}")
         
         # Enhanced location extraction with multi-language support
         location_aliases = {
@@ -321,9 +326,17 @@ async def chat(chat_request: ChatRequest):
         merged_preferences = existing_preferences.copy()
         merged_preferences["language"] = detected_language
         
-        if preferences:
+        # Initialize units_shown if not exists
+        if "units_shown" not in merged_preferences:
+            merged_preferences["units_shown"] = []
+        
+        # If new preferences are provided (not just pagination), reset units_shown
+        if preferences and not is_pagination_request:
             merged_preferences.update(preferences)
-            logger.info(f"Merging preferences: existing={existing_preferences}, new={preferences}, merged={merged_preferences}")
+            merged_preferences["units_shown"] = []  # Reset pagination on new search
+            logger.info(f"New search: Merging preferences: existing={existing_preferences}, new={preferences}, merged={merged_preferences}")
+        elif is_pagination_request:
+            logger.info(f"Pagination request detected, keeping existing units_shown: {merged_preferences.get('units_shown', [])}")
         
         # Determine qualification stage based on collected preferences
         new_stage = current_stage
@@ -387,10 +400,32 @@ async def chat(chat_request: ChatRequest):
         
         logger.info(f"Query returned {len(units)} units")
 
+        # Implement pagination logic
+        units_shown = existing_preferences.get("units_shown", [])
+        units_per_page = 3
+        
+        # Filter out units that have already been shown
+        available_units = [unit for unit in units if unit['unit_id'] not in units_shown]
+        
+        # Get the next batch of units to show
+        units_to_show = available_units[:units_per_page]
+        
+        # Calculate pagination info
+        total_units = len(units)
+        total_shown = len(units_shown)
+        units_being_shown = len(units_to_show)
+        remaining_units = len(available_units) - units_being_shown
+        
+        logger.info(f"Pagination: Total={total_units}, Already shown={total_shown}, Showing now={units_being_shown}, Remaining={remaining_units}")
+
         unit_context = ""
-        if units:
+        pagination_info = ""
+        
+        if units_to_show:
             unit_details = []
-            for unit in units[:3]:  # Show top 3 units
+            newly_shown_unit_ids = []
+            
+            for unit in units_to_show:
                 photos = unit['photos_urls'] if unit['photos_urls'] else []
                 photo_text = ""
                 if photos:
@@ -398,11 +433,43 @@ async def chat(chat_request: ChatRequest):
                 
                 unit_text = f"Unit {unit['unit_number'] or 'N/A'} at {unit['address']}, {unit['size_sqm']} sqm, {unit['price_jod']} JOD, {unit['bedrooms']} bedrooms{photo_text}\nDescription: {unit['description_ar'][:200]}..."
                 unit_details.append(unit_text)
+                newly_shown_unit_ids.append(unit['unit_id'])
             
             unit_context = "\n\n".join(unit_details)
-            logger.info(f"Unit context created with {len(units)} units and photos")
+            
+            # Update units_shown in database
+            updated_units_shown = units_shown + newly_shown_unit_ids
+            existing_preferences["units_shown"] = updated_units_shown
+            
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE Customers SET preferences = %s WHERE conversation_id = %s",
+                (json.dumps(existing_preferences), conversation_id)
+            )
+            conn.commit()
+            cur.close()
+            
+            # Create pagination info for LLM
+            if is_pagination_request:
+                if remaining_units > 0:
+                    pagination_info = f"Showing {units_being_shown} more apartments (total {total_shown + units_being_shown} shown out of {total_units} found). {remaining_units} more apartments available."
+                else:
+                    pagination_info = f"Showing {units_being_shown} more apartments (total {total_shown + units_being_shown} shown out of {total_units} found). These are all the apartments that match your criteria."
+            else:
+                if remaining_units > 0:
+                    pagination_info = f"Showing {units_being_shown} of {total_units} apartments found. {remaining_units} more apartments available."
+                else:
+                    pagination_info = f"Showing all {total_units} apartments found."
+            
+            logger.info(f"Unit context created with pagination info: {pagination_info}")
+        elif total_units > 0:
+            # All units have been shown already
+            unit_context = "You have already seen all the apartments that match your criteria."
+            pagination_info = f"All {total_units} matching apartments have been shown."
+            logger.info("All matching units have been shown")
         else:
             unit_context = "No apartments found matching the criteria."
+            pagination_info = "No apartments found."
             logger.info("No units found, using default message")
 
         if llm and ai_settings:
@@ -442,16 +509,23 @@ Stage Guidance: {stage_prompts.get(current_stage, stage_prompts['initial'])}
 
 Current Customer Preferences: {preferences_context}
 
+Pagination Information: {pagination_info}
+
 Available Units Based on Preferences:
 {unit_context}
 
-Instructions:
+AI Agent Instructions:
+- You are a professional real estate agent helping customers find apartments
 - Respond in {detected_language.upper()} language only
 - Follow the stage guidance to ask appropriate follow-up questions
 - If units are available, present them in a clear, organized format with key details
 - Guide the conversation toward collecting missing information (budget, bedrooms, location, contact info)
-- Be conversational and helpful
+- Be conversational, helpful, and maintain a professional real estate agent persona
 - Include unit numbers, addresses, sizes, prices, and key features when showing units
+- When showing units, use the pagination information to naturally communicate how many units are available
+- If more units are available, naturally offer to show them by saying something like "Would you like to see more options?" or "I have more apartments that might interest you"
+- If this is a pagination request, acknowledge it naturally and present the new units
+- Always maintain conversation context and remember what has been shown before
 """
             
             prompt_template = ChatPromptTemplate.from_messages([
@@ -466,22 +540,55 @@ Instructions:
                 
                 # If LLM response is too generic, use rule-based fallback
                 if not bot_response or "how can i help" in bot_response.lower():
-                    if units:
-                        bot_response = f"Found {len(units)} apartments matching your criteria:\n{unit_context}"
+                    if units_to_show:
+                        if is_pagination_request:
+                            if remaining_units > 0:
+                                bot_response = f"Here are {units_being_shown} more apartments:\n{unit_context}\n\nI have {remaining_units} more apartments available. Would you like to see more?"
+                            else:
+                                bot_response = f"Here are the last {units_being_shown} apartments:\n{unit_context}\n\nThese are all the apartments that match your criteria."
+                        else:
+                            if remaining_units > 0:
+                                bot_response = f"{pagination_info}\n{unit_context}\n\nWould you like to see more options?"
+                            else:
+                                bot_response = f"{pagination_info}\n{unit_context}"
+                    elif total_units > 0:
+                        bot_response = unit_context  # "You have already seen all the apartments..."
                     else:
                         bot_response = "No apartments found matching your criteria. Please provide more details like budget, bedrooms, or location."
                         
             except Exception as e:
                 logger.error(f"LLM failed: {str(e)}")
                 # Rule-based fallback
-                if units:
-                    bot_response = f"Found {len(units)} apartments matching your criteria:\n{unit_context}"
+                if units_to_show:
+                    if is_pagination_request:
+                        if remaining_units > 0:
+                            bot_response = f"Here are {units_being_shown} more apartments:\n{unit_context}\n\nI have {remaining_units} more apartments available. Would you like to see more?"
+                        else:
+                            bot_response = f"Here are the last {units_being_shown} apartments:\n{unit_context}\n\nThese are all the apartments that match your criteria."
+                    else:
+                        if remaining_units > 0:
+                            bot_response = f"{pagination_info}\n{unit_context}\n\nWould you like to see more options?"
+                        else:
+                            bot_response = f"{pagination_info}\n{unit_context}"
+                elif total_units > 0:
+                    bot_response = unit_context  # "You have already seen all the apartments..."
                 else:
                     bot_response = "No apartments found matching your criteria. Please provide more details like budget, bedrooms, or location."
         else:
             # Rule-based response when no LLM
-            if units:
-                bot_response = f"Found {len(units)} apartments matching your criteria:\n{unit_context}"
+            if units_to_show:
+                if is_pagination_request:
+                    if remaining_units > 0:
+                        bot_response = f"Here are {units_being_shown} more apartments:\n{unit_context}\n\nI have {remaining_units} more apartments available. Would you like to see more?"
+                    else:
+                        bot_response = f"Here are the last {units_being_shown} apartments:\n{unit_context}\n\nThese are all the apartments that match your criteria."
+                else:
+                    if remaining_units > 0:
+                        bot_response = f"{pagination_info}\n{unit_context}\n\nWould you like to see more options?"
+                    else:
+                        bot_response = f"{pagination_info}\n{unit_context}"
+            elif total_units > 0:
+                bot_response = unit_context  # "You have already seen all the apartments..."
             else:
                 bot_response = "No apartments found matching your criteria. Please provide more details like budget, bedrooms, or location."
 
@@ -495,7 +602,8 @@ Instructions:
             """,
             (conversation_id, user_message, bot_response)
         )
-        chat_id = cur.fetchone()['chat_id']
+        chat_result = cur.fetchone()
+        chat_id = chat_result['chat_id'] if chat_result else None
         conn.commit()
         cur.close()
         conn.close()
