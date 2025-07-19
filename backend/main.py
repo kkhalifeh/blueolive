@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
 import psycopg2
@@ -25,8 +26,26 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI
-app = FastAPI()
+app = FastAPI(
+    title="BlueOlive Real Estate AI Agent API",
+    description="AI-powered real estate chatbot API with bilingual support",
+    version="1.0.0"
+)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # Frontend development server
+        "http://127.0.0.1:3000",  # Alternative localhost
+        "http://localhost:5173",  # Vite default port
+        "http://127.0.0.1:5173",  # Alternative Vite port
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
+)
 
 # Load environment variables
 load_dotenv()
@@ -47,20 +66,30 @@ def get_db_connection():
 
 # Initialize LLM
 llm = None
+logger.info(f"LLM_PROVIDER: {LLM_PROVIDER}")
+logger.info(f"XAI_API_KEY present: {bool(XAI_API_KEY)}")
+logger.info(f"OPENAI_API_KEY present: {bool(OPENAI_API_KEY)}")
+
 if LLM_PROVIDER == "xai" and XAI_API_KEY:
     try:
         llm = ChatXAI(api_key=XAI_API_KEY, model="grok-3")
-        logger.info("Initialized xAI ChatXAI (Grok 3)")
+        logger.info("✅ Successfully initialized xAI ChatXAI (Grok 3)")
     except Exception as e:
-        logger.error(f"Failed to initialize xAI ChatXAI: {str(e)}")
+        logger.error(f"❌ Failed to initialize xAI ChatXAI: {str(e)}")
 elif LLM_PROVIDER == "openai" and OPENAI_API_KEY:
     try:
         llm = ChatOpenAI(api_key=OPENAI_API_KEY, model="gpt-4o")
-        logger.info("Initialized OpenAI ChatGPT (GPT-4o)")
+        logger.info("✅ Successfully initialized OpenAI ChatGPT (GPT-4o)")
     except Exception as e:
-        logger.error(f"Failed to initialize OpenAI ChatGPT: {str(e)}")
+        logger.error(f"❌ Failed to initialize OpenAI ChatGPT: {str(e)}")
 else:
-    logger.warning("No valid LLM provider configured. Using rule-based logic.")
+    logger.warning(f"❌ No valid LLM provider configured. LLM_PROVIDER='{LLM_PROVIDER}', XAI_KEY={bool(XAI_API_KEY)}, OPENAI_KEY={bool(OPENAI_API_KEY)}")
+
+logger.info(f"Final LLM status: {llm is not None}")
+if llm:
+    logger.info("🎉 LLM is ready for conversations!")
+else:
+    logger.error("💥 LLM failed to initialize - will use fallback responses")
 
 # Initialize vector store
 embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -138,12 +167,78 @@ def verify_token(token: str = Depends(oauth2_scheme)):
         logger.error(f"Invalid token: {str(e)}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
+# Root endpoint
+@app.get("/")
+async def read_root():
+    return {
+        "message": "BlueOlive Real Estate AI Agent API",
+        "version": "1.0.0",
+        "status": "active",
+        "endpoints": {
+            "chat": "/chat",
+            "units": "/units",
+            "admin": "/admin/*"
+        }
+    }
+
 # Placeholder admin login
 @app.get("/token")
 async def get_token():
     payload = {"sub": "admin"}
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
     return {"access_token": token, "token_type": "bearer"}
+
+# Debug endpoint to test LLM directly
+@app.get("/debug/llm")
+async def debug_llm():
+    logger.info("🔧 LLM Debug endpoint called")
+    
+    result = {
+        "llm_initialized": llm is not None,
+        "llm_provider": LLM_PROVIDER,
+        "openai_key_present": bool(OPENAI_API_KEY),
+        "xai_key_present": bool(XAI_API_KEY)
+    }
+    
+    if llm:
+        try:
+            from langchain_core.messages import HumanMessage
+            test_response = llm.invoke([HumanMessage(content="Say hello")])
+            result["llm_test"] = "SUCCESS"
+            result["test_response"] = test_response.content
+            logger.info("✅ LLM test successful")
+        except Exception as e:
+            result["llm_test"] = "FAILED" 
+            result["error"] = str(e)
+            logger.error(f"❌ LLM test failed: {str(e)}")
+    else:
+        result["llm_test"] = "NOT_INITIALIZED"
+        logger.error("❌ LLM not initialized")
+    
+    return result
+
+# Debug endpoint to check chat conditions
+@app.get("/debug/chat-conditions")
+async def debug_chat_conditions():
+    logger.info("🔧 Chat conditions debug endpoint called")
+    
+    # Get AI settings just like in chat endpoint
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT prompt, temperature, max_tokens FROM AI_Settings ORDER BY setting_id DESC LIMIT 1")
+    ai_settings = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    result = {
+        "llm_available": llm is not None,
+        "ai_settings_available": ai_settings is not None,
+        "condition_check": (llm is not None) and (ai_settings is not None),
+        "ai_settings_data": dict(ai_settings) if ai_settings else None
+    }
+    
+    logger.info(f"🔍 Debug result: {result}")
+    return result
 
 # Endpoint to query units
 @app.get("/units", response_model=list[Unit])
@@ -266,22 +361,65 @@ async def chat(chat_request: ChatRequest):
         
         # Parse preferences
         preferences = {}
-        budget_match = re.search(r'(\d+)(?:\s*(?:jod|jd|\$))?', user_message.lower())
-        if budget_match:
-            preferences["budget"] = float(budget_match.group(1))
-            logger.info(f"Extracted budget: {preferences['budget']}")
+        
+        # Check for specific unit number search
+        unit_number_patterns = [
+            r'unit\s*(\d+)',           # English: unit 117
+            r'شقة\s*رقم\s*(\d+)',       # Arabic: شقة رقم 117
+            r'وحدة\s*(\d+)',           # Arabic: وحدة 117
+            r'about\s*unit\s*(\d+)',   # English: about unit 117
+            r'معلومات\s*عن\s*شقة\s*(\d+)', # Arabic: معلومات عن شقة 117
+        ]
+        
+        unit_search = None
+        for pattern in unit_number_patterns:
+            unit_match = re.search(pattern, user_message.lower())
+            if unit_match:
+                unit_search = unit_match.group(1)
+                logger.info(f"Detected unit number search for: {unit_search}")
+                break
+        
+        # Check for feature-based search (for vector search)
+        feature_keywords = [
+            'balcony', 'بلكونة', 'بلكونتين', 'garage', 'كراج', 'parking', 'موقف',
+            'elevator', 'مصعد', 'garden', 'حديقة', 'view', 'إطلالة', 'مطل',
+            'furnished', 'مفروش', 'kitchen', 'مطبخ', 'terrace', 'تراس'
+        ]
+        
+        has_feature_search = any(keyword in user_message.lower() for keyword in feature_keywords)
+        
+        # Budget extraction - more specific patterns to avoid conflict with bedroom numbers
+        budget_patterns = [
+            r'بميزانية\s*(\d+)',  # Arabic: بميزانية 60000
+            r'ميزانية\s*(\d+)',   # Arabic: ميزانية 60000
+            r'budget\s*(\d+)',    # English: budget 60000
+            r'(\d{4,})\s*(?:jod|jd)', # 4+ digits followed by JOD
+            r'(\d{4,})\s*دينار',  # 4+ digits followed by دينار
+            r'(\d{4,})\s*(?:$|dollar)', # 4+ digits followed by $ or dollar
+        ]
+        
+        budget_match = None
+        for pattern in budget_patterns:
+            budget_match = re.search(pattern, user_message.lower())
+            if budget_match:
+                preferences["budget"] = float(budget_match.group(1))
+                logger.info(f"Extracted budget: {preferences['budget']} from pattern: {pattern}")
+                break
         # English pattern
         bedrooms_match = re.search(r'(\d+)\s*bedrooms?', user_message.lower())
         if not bedrooms_match:
-            # Arabic patterns
-            bedrooms_match = re.search(r'(\d+)\s*غرف?', user_message) or re.search(r'(ثلاث|اثنين|واحد|أربع|خمس)', user_message)
-            if bedrooms_match:
+            # Arabic patterns - enhanced to catch more variations
+            arabic_digit_pattern = re.search(r'(\d+)\s*غرف?', user_message)
+            arabic_word_pattern = re.search(r'(ثلاث|اثنين|واحد|أربع|خمس)\s*غرف?', user_message)
+            
+            if arabic_digit_pattern:
+                preferences["bedrooms"] = int(arabic_digit_pattern.group(1))
+                logger.info(f"Extracted Arabic bedrooms (digit): {arabic_digit_pattern.group(1)}")
+            elif arabic_word_pattern:
                 arabic_numbers = {'واحد': 1, 'اثنين': 2, 'ثلاث': 3, 'أربع': 4, 'خمس': 5}
-                bedroom_text = bedrooms_match.group(1)
-                if bedroom_text.isdigit():
-                    preferences["bedrooms"] = int(bedroom_text)
-                elif bedroom_text in arabic_numbers:
-                    preferences["bedrooms"] = arabic_numbers[bedroom_text]
+                bedroom_text = arabic_word_pattern.group(1)
+                preferences["bedrooms"] = arabic_numbers[bedroom_text]
+                logger.info(f"Extracted Arabic bedrooms (word): {bedroom_text} -> {arabic_numbers[bedroom_text]}")
         elif bedrooms_match:
             preferences["bedrooms"] = int(bedrooms_match.group(1))
             
@@ -374,31 +512,94 @@ async def chat(chat_request: ChatRequest):
         preferences_context = json.dumps(existing_preferences)
         logger.info(f"Using preferences for query: {existing_preferences}")
 
-        # Query units based on existing preferences (now merged)
-        query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE 1=1"
-        params = []
-        logger.info(f"Building query with preferences: {existing_preferences}")
-        if existing_preferences.get("budget"):
-            query += " AND price_jod <= %s"
-            params.append(existing_preferences["budget"])
-            logger.info(f"Added budget filter: {existing_preferences['budget']}")
-        if existing_preferences.get("bedrooms"):
-            query += " AND bedrooms = %s"
-            params.append(existing_preferences["bedrooms"])
-            logger.info(f"Added bedrooms filter: {existing_preferences['bedrooms']}")
-        if existing_preferences.get("location"):
-            query += " AND address ILIKE %s"
-            params.append(f"%{existing_preferences['location']}%")
-            logger.info(f"Added location filter: {existing_preferences['location']}")
+        # Check if this is a greeting message FIRST (before checking preferences)
+        greeting_keywords = ['hello', 'hi', 'hey', 'مرحبا', 'السلام عليكم', 'good morning', 'good evening']
+        is_greeting = any(keyword.lower() in user_message.lower() for keyword in greeting_keywords)
         
-        logger.info(f"Final query: {query} with params: {params}")
+        # Check if user is asking for apartments or has preferences
+        apartment_keywords = ['apartment', 'شقة', 'unit', 'وحدة', 'bedroom', 'غرفة', 'budget', 'price', 'سعر', 'location', 'منطقة', 'available', 'متاح', 'show', 'عرض']
+        has_apartment_intent = any(keyword in user_message.lower() for keyword in apartment_keywords)
+        has_preferences = any(existing_preferences.get(key) for key in ['budget', 'bedrooms', 'location'])
         
-        cur = conn.cursor()
-        cur.execute(query, params)
-        units = cur.fetchall()
-        cur.close()
+        # DEBUG: Log the conditions
+        logger.info(f"Debug for message '{user_message}': is_greeting={is_greeting}, has_apartment_intent={has_apartment_intent}, has_preferences={has_preferences}, is_pagination_request={is_pagination_request}")
+        logger.info(f"existing_preferences: {existing_preferences}")
         
-        logger.info(f"Query returned {len(units)} units")
+        # Only query for units if user has apartment intent or preferences, AND it's not just a greeting
+        # Greetings should NOT trigger unit queries even if preferences exist
+        units = []
+        should_query_units = (has_apartment_intent or has_preferences or is_pagination_request or unit_search or has_feature_search) and not (is_greeting and not has_apartment_intent)
+        logger.info(f"Should query units: {should_query_units} (unit_search: {unit_search}, has_feature_search: {has_feature_search})")
+        
+        if should_query_units:
+            cur = conn.cursor()
+            
+            # Handle specific unit number search
+            if unit_search:
+                query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE unit_number = %s"
+                params = [unit_search]
+                logger.info(f"Unit number search for: {unit_search}")
+                
+            # Handle feature-based semantic search (if vector search is available)
+            elif has_feature_search and vector_store:
+                logger.info(f"Performing semantic search for features in: {user_message}")
+                # Use vector search to find relevant units
+                try:
+                    # Get embeddings for the search query
+                    search_results = vector_store.similarity_search(user_message, k=5)
+                    logger.info(f"Vector search returned {len(search_results)} results")
+                    
+                    # Extract unit IDs from search results
+                    unit_ids = []
+                    for result in search_results:
+                        # The metadata should contain unit_id
+                        if hasattr(result, 'metadata') and 'unit_id' in result.metadata:
+                            unit_ids.append(result.metadata['unit_id'])
+                    
+                    if unit_ids:
+                        # Query units based on vector search results
+                        query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE unit_id = ANY(%s)"
+                        params = [unit_ids]
+                        logger.info(f"Vector search found unit IDs: {unit_ids}")
+                    else:
+                        # Fallback to regular search
+                        query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE 1=1"
+                        params = []
+                        logger.info("Vector search didn't return unit IDs, falling back to regular search")
+                        
+                except Exception as e:
+                    logger.error(f"Vector search failed: {e}")
+                    # Fallback to regular search
+                    query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE 1=1"
+                    params = []
+                    
+            # Regular preference-based search
+            else:
+                query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE 1=1"
+                params = []
+                logger.info(f"Building query with preferences: {existing_preferences}")
+                if existing_preferences.get("budget"):
+                    query += " AND price_jod <= %s"
+                    params.append(existing_preferences["budget"])
+                    logger.info(f"Added budget filter: {existing_preferences['budget']}")
+                if existing_preferences.get("bedrooms"):
+                    query += " AND bedrooms = %s"
+                    params.append(existing_preferences["bedrooms"])
+                    logger.info(f"Added bedrooms filter: {existing_preferences['bedrooms']}")
+                if existing_preferences.get("location"):
+                    query += " AND address ILIKE %s"
+                    params.append(f"%{existing_preferences['location']}%")
+                    logger.info(f"Added location filter: {existing_preferences['location']}")
+            
+            logger.info(f"Final query: {query} with params: {params}")
+            
+            cur.execute(query, params)
+            units = cur.fetchall()
+            cur.close()
+            
+            logger.info(f"Query returned {len(units)} units")
+        else:
+            logger.info("No apartment intent or preferences detected, skipping unit query")
 
         # Implement pagination logic
         units_shown = existing_preferences.get("units_shown", [])
@@ -429,7 +630,11 @@ async def chat(chat_request: ChatRequest):
                 photos = unit['photos_urls'] if unit['photos_urls'] else []
                 photo_text = ""
                 if photos:
-                    photo_text = f"\nPhotos: {', '.join(photos[:2])}"  # Show up to 2 photos
+                    # Format photos as clickable links
+                    photo_links = []
+                    for i, photo in enumerate(photos[:2]):
+                        photo_links.append(f"[Photo {i+1}]({photo})")
+                    photo_text = f"\nPhotos: {', '.join(photo_links)}"
                 
                 unit_text = f"Unit {unit['unit_number'] or 'N/A'} at {unit['address']}, {unit['size_sqm']} sqm, {unit['price_jod']} JOD, {unit['bedrooms']} bedrooms{photo_text}\nDescription: {unit['description_ar'][:200]}..."
                 unit_details.append(unit_text)
@@ -472,14 +677,134 @@ async def chat(chat_request: ChatRequest):
             pagination_info = "No apartments found."
             logger.info("No units found, using default message")
 
+        # Always use LLM for all conversations (no hardcoded responses)
+        logger.info(f"🔍 Chat Debug - Message: '{user_message}'")
+        logger.info(f"🔍 LLM available: {llm is not None}, AI settings available: {ai_settings is not None}")
+        logger.info(f"🔍 unit_context preview: {unit_context[:100]}...")
+        
+        # Force LLM processing - both conditions are met
+        logger.info(f"🔍 LLM check: llm={llm is not None}, ai_settings={ai_settings is not None}")
         if llm and ai_settings:
+            logger.info("✅ Entering LLM processing path")
+        else:
+            logger.error(f"❌ LLM check failed: llm={llm}, ai_settings={ai_settings}")
+            
+        # ALWAYS USE LLM for all conversations (no fallbacks)
+        if llm:
+            logger.info("🚀 Using LLM for ALL conversations")
+            try:
+                # Build comprehensive context for LLM
+                context_parts = []
+                
+                # Add customer qualification stage context
+                context_parts.append(f"Customer Language: {detected_language.upper()}")
+                context_parts.append(f"Qualification Stage: {current_stage}")
+                
+                # Add preferences context if available
+                if existing_preferences:
+                    context_parts.append(f"Customer Preferences: {json.dumps(existing_preferences)}")
+                
+                # Add unit context if available  
+                if unit_context and unit_context != "No apartments found matching the criteria.":
+                    context_parts.append(f"Available Units:\n{unit_context}")
+                    if pagination_info:
+                        context_parts.append(f"Pagination Info: {pagination_info}")
+                
+                context = "\n\n".join(context_parts)
+                
+                # Create comprehensive LLM prompt with qualification stage awareness
+                system_prompt = f"""You are a professional real estate agent for BlueOlive Real Estate.
+
+CUSTOMER CONTEXT:
+{context}
+
+QUALIFICATION STAGE TRACKING:
+- Current Stage: {current_stage}
+- Progress: initial → budget_collected → bedrooms_collected → location_collected → contact_info_collected
+
+CRITICAL CONSTRAINT - ONLY USE DATABASE RESULTS:
+- You can ONLY show apartments that are provided in the "Available Units" section above
+- NEVER create, invent, or hallucinate apartment listings
+- If no units are provided in the context, inform the customer that no matching apartments are available
+- DO NOT make up unit names, prices, or features that are not in the database
+- ONLY use the exact unit details, photos, and descriptions provided in the Available Units section
+
+INSTRUCTIONS:
+- Respond ONLY in {detected_language.upper()} language
+- Be conversational, helpful, and professional
+- If Arabic: Use casual, friendly tone (not formal) - use "كيف ممكن أساعدك؟" instead of formal expressions
+- If customer is greeting (hello, hi, مرحبا), respond warmly and ask how you can help find an apartment
+- Guide conversation based on current qualification stage:
+  * initial: Ask about apartment requirements (budget, bedrooms, location)
+  * budget_collected: Ask about bedrooms and location
+  * bedrooms_collected: Ask about location and size preferences
+  * location_collected: Show matching units and ask about contact info
+  * contact_info_collected: Schedule viewings and provide additional assistance
+- If units are available in the context, present them clearly with key details, photos, and descriptions
+- Format photo links as clickable markdown links: [Photo 1](URL) for easy access
+- If NO units are available, inform the customer and ask them to adjust their criteria
+- Ask natural follow-up questions to progress the conversation
+- If this is a pagination request, acknowledge it and show more units
+- Focus on helping customer find their perfect apartment using ONLY real database results
+
+CONVERSATION STYLE - IMPORTANT:
+- When providing detailed information or multiple units, break your response into natural conversation parts
+- Each part should feel like a separate message in a chat conversation (2-3 sentences maximum per part)
+- For example, instead of one long response, send:
+  1. Brief introduction/summary
+  2. First unit details
+  3. Second unit details  
+  4. Follow-up question or call to action
+- This creates a more natural, human-like conversation flow
+
+Customer Message: "{user_message}"
+"""
+                
+                logger.info(f"🎯 Sending to LLM: {system_prompt[:200]}...")
+                
+                from langchain_core.messages import HumanMessage, SystemMessage
+                response = llm.invoke([
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_message)
+                ])
+                bot_response = response.content
+                logger.info(f"✅ LLM response: {bot_response[:100]}...")
+                
+                # Log qualification stage and conversation tracking
+                logger.info(f"📊 QUALIFICATION TRACKING:")
+                logger.info(f"   - Conversation ID: {conversation_id}")
+                logger.info(f"   - Current Stage: {current_stage}")
+                logger.info(f"   - Language: {detected_language}")
+                logger.info(f"   - User Message: {user_message}")
+                logger.info(f"   - Preferences: {existing_preferences}")
+                logger.info(f"   - Units Found: {len(units_to_show) if units_to_show else 0}")
+                logger.info(f"   - Bot Response Length: {len(bot_response)} chars")
+                
+                # Store the chat
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO Chats (conversation_id, user_message, bot_response) VALUES (%s, %s, %s)",
+                    (conversation_id, user_message, bot_response)
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+                
+                logger.info(f"💾 Chat stored successfully for conversation {conversation_id}")
+                
+                return {"conversation_id": conversation_id, "bot_response": bot_response}
+                    
+            except Exception as e:
+                logger.error(f"❌ LLM processing failed: {str(e)}")
+                # Continue to original logic below
             # Language-specific instructions
             language_instructions = {
                 'ar': """
 - Respond in Arabic only
-- Use Arabic greetings: "مرحبا! كيف يمكنني مساعدتك؟"
+- Use casual Arabic greetings: "مرحبا! كيف ممكن أساعدك؟"
 - Format numbers and prices clearly in Arabic context
-- Use formal Arabic language
+- Use casual, friendly Arabic language (not formal)
+- Use everyday Arabic expressions and be conversational
 """,
                 'en': """
 - Respond in English only  
@@ -518,6 +843,7 @@ AI Agent Instructions:
 - You are a professional real estate agent helping customers find apartments
 - Respond in {detected_language.upper()} language only
 - Follow the stage guidance to ask appropriate follow-up questions
+- If the user is just greeting (hello, hi, مرحبا, etc.), respond with a warm greeting and ask how you can help with their apartment search
 - If units are available, present them in a clear, organized format with key details
 - Guide the conversation toward collecting missing information (budget, bedrooms, location, contact info)
 - Be conversational, helpful, and maintain a professional real estate agent persona
@@ -526,6 +852,17 @@ AI Agent Instructions:
 - If more units are available, naturally offer to show them by saying something like "Would you like to see more options?" or "I have more apartments that might interest you"
 - If this is a pagination request, acknowledge it naturally and present the new units
 - Always maintain conversation context and remember what has been shown before
+- IMPORTANT: Only show apartments when the user has expressed interest in apartment search, NOT for general greetings
+
+CONVERSATION STYLE - IMPORTANT:
+- When providing detailed information or multiple units, break your response into natural conversation parts
+- Each part should feel like a separate message in a chat conversation (2-3 sentences maximum per part)
+- For example, instead of one long response, send:
+  1. Brief introduction/summary
+  2. First unit details
+  3. Second unit details  
+  4. Follow-up question or call to action
+- This creates a more natural, human-like conversation flow
 """
             
             prompt_template = ChatPromptTemplate.from_messages([
@@ -576,7 +913,16 @@ AI Agent Instructions:
                     bot_response = "No apartments found matching your criteria. Please provide more details like budget, bedrooms, or location."
         else:
             # Rule-based response when no LLM
-            if units_to_show:
+            logger.error(f"❌ LLM not available! llm={llm is not None}, ai_settings={ai_settings is not None}")
+            logger.error("💥 Using fallback rule-based responses instead of AI conversation")
+            # Rule-based responses when LLM is not available
+            # Handle greetings even when LLM is not available
+            if is_greeting and not has_apartment_intent and not units_to_show:
+                if detected_language == 'ar':
+                    bot_response = "مرحبا! أنا وكيل عقارات متخصص في شركة BlueOlive. كيف يمكنني مساعدتك في العثور على الشقة المثالية؟"
+                else:
+                    bot_response = "Hello! I'm a real estate agent with BlueOlive. How can I help you find the perfect apartment today?"
+            elif units_to_show:
                 if is_pagination_request:
                     if remaining_units > 0:
                         bot_response = f"Here are {units_being_shown} more apartments:\n{unit_context}\n\nI have {remaining_units} more apartments available. Would you like to see more?"
@@ -589,8 +935,10 @@ AI Agent Instructions:
                         bot_response = f"{pagination_info}\n{unit_context}"
             elif total_units > 0:
                 bot_response = unit_context  # "You have already seen all the apartments..."
+            elif has_apartment_intent:
+                bot_response = "I'd be happy to help you find an apartment! Could you tell me your preferences for budget, number of bedrooms, and preferred location?"
             else:
-                bot_response = "No apartments found matching your criteria. Please provide more details like budget, bedrooms, or location."
+                bot_response = "Hello! I'm here to help you find the perfect apartment. Could you tell me what you're looking for?"
 
         # Store chat in database
         cur = conn.cursor()
