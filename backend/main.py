@@ -369,6 +369,11 @@ async def chat(chat_request: ChatRequest):
             r'وحدة\s*(\d+)',           # Arabic: وحدة 117
             r'about\s*unit\s*(\d+)',   # English: about unit 117
             r'معلومات\s*عن\s*شقة\s*(\d+)', # Arabic: معلومات عن شقة 117
+            r'تفاصيل\s*شقة\s*(\d+)',    # Arabic: تفاصيل شقة 113
+            r'اعطيني\s*تفاصيل\s*شقة\s*(\d+)', # Arabic: اعطيني تفاصيل شقة 113
+            r'شقة\s*(\d+)',            # Arabic: شقة 113  
+            r'احكيلي\s*عن\s*شقة\s*(\d+)', # Arabic: احكيلي عن شقة 113
+            r'معلومات\s*شقة\s*(\d+)',   # Arabic: معلومات شقة 113
         ]
         
         unit_search = None
@@ -387,6 +392,8 @@ async def chat(chat_request: ChatRequest):
         ]
         
         has_feature_search = any(keyword in user_message.lower() for keyword in feature_keywords)
+        logger.info(f"Feature search detection: {has_feature_search} for message: {user_message}")
+        logger.info(f"Vector store available: {vector_store is not None}")
         
         # Budget extraction - more specific patterns to avoid conflict with bedroom numbers
         budget_patterns = [
@@ -540,38 +547,67 @@ async def chat(chat_request: ChatRequest):
                 params = [unit_search]
                 logger.info(f"Unit number search for: {unit_search}")
                 
-            # Handle feature-based semantic search (if vector search is available)
-            elif has_feature_search and vector_store:
-                logger.info(f"Performing semantic search for features in: {user_message}")
-                # Use vector search to find relevant units
-                try:
-                    # Get embeddings for the search query
-                    search_results = vector_store.similarity_search(user_message, k=5)
-                    logger.info(f"Vector search returned {len(search_results)} results")
-                    
-                    # Extract unit IDs from search results
-                    unit_ids = []
-                    for result in search_results:
-                        # The metadata should contain unit_id
-                        if hasattr(result, 'metadata') and 'unit_id' in result.metadata:
-                            unit_ids.append(result.metadata['unit_id'])
-                    
-                    if unit_ids:
-                        # Query units based on vector search results
-                        query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE unit_id = ANY(%s)"
-                        params = [unit_ids]
-                        logger.info(f"Vector search found unit IDs: {unit_ids}")
+            # Handle feature-based search with direct database search
+            elif has_feature_search:
+                logger.info(f"Performing feature-based search for: {user_message}")
+                
+                # Extract specific features mentioned in the message
+                feature_conditions = []
+                feature_params = []
+                
+                # Check for elevator (مصعد/elevator)
+                if any(word in user_message.lower() for word in ['مصعد', 'elevator']):
+                    feature_conditions.append("description_ar ILIKE %s")
+                    feature_params.append("%مصعد%")
+                    logger.info("Added elevator filter")
+                
+                # Check for balcony (بلكونة/balcony)  
+                if any(word in user_message.lower() for word in ['بلكونة', 'بلكون', 'balcony']):
+                    feature_conditions.append("description_ar ILIKE %s")
+                    feature_params.append("%بلكون%")
+                    logger.info("Added balcony filter")
+                
+                # Check for garage (كراج/garage)
+                if any(word in user_message.lower() for word in ['كراج', 'garage', 'موقف']):
+                    feature_conditions.append("description_ar ILIKE %s") 
+                    feature_params.append("%كراج%")
+                    logger.info("Added garage filter")
+                
+                # Check for terrace (تراس/terrace)
+                if any(word in user_message.lower() for word in ['تراس', 'terrace']):
+                    feature_conditions.append("description_ar ILIKE %s")
+                    feature_params.append("%تراس%")
+                    logger.info("Added terrace filter")
+                
+                # Build query with feature conditions
+                if feature_conditions:
+                    query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE " + " OR ".join(feature_conditions)
+                    params = feature_params
+                    logger.info(f"Feature search query: {query} with params: {feature_params}")
+                else:
+                    # Fallback to vector search if available
+                    if vector_store:
+                        logger.info("Trying vector search as fallback")
+                        try:
+                            search_results = vector_store.similarity_search(user_message, k=5)
+                            unit_ids = []
+                            for result in search_results:
+                                if hasattr(result, 'metadata') and 'unit_id' in result.metadata:
+                                    unit_ids.append(result.metadata['unit_id'])
+                            
+                            if unit_ids:
+                                query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE unit_id = ANY(%s)"
+                                params = [unit_ids]
+                            else:
+                                query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE 1=1"
+                                params = []
+                        except Exception as e:
+                            logger.error(f"Vector search failed: {e}")
+                            query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE 1=1"
+                            params = []
                     else:
-                        # Fallback to regular search
                         query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE 1=1"
                         params = []
-                        logger.info("Vector search didn't return unit IDs, falling back to regular search")
-                        
-                except Exception as e:
-                    logger.error(f"Vector search failed: {e}")
-                    # Fallback to regular search
-                    query = "SELECT unit_id, project_id, unit_number, address, size_sqm, price_jod, bedrooms, bathrooms, floor_type, floor_number, description_ar, photos_urls FROM Units WHERE 1=1"
-                    params = []
                     
             # Regular preference-based search
             else:
